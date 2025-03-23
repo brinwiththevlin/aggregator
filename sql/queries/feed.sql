@@ -7,7 +7,7 @@ RETURNING
 -- name: GetFeeds :many
 SELECT
     f.*,
-    u.name
+    u.name as user_name
 FROM
     feeds f
     INNER JOIN users u ON f.user_id = u.id;
