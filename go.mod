@@ -1,4 +1,4 @@
-module aggregator
+module github.com/brinwiththevlin/aggregator
 
 go 1.23.3
 
