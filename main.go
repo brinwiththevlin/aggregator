@@ -10,9 +10,11 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	_ "github.com/lib/pq"
 )
 
@@ -73,6 +75,8 @@ func main() {
 	cmds.register("feeds", handlerFeeds)
 	cmds.register("follow", middlewareLoggedIn(handlerFollow))
 	cmds.register("following", middlewareLoggedIn(handlerFollowing))
+	cmds.register("unfollow", middlewareLoggedIn(handlerUnfollow))
+	cmds.register("browse", middlewareLoggedIn(handlerBrowse))
 
 	commandName := args[1]
 	commandArgs := args[2:]
@@ -88,7 +92,7 @@ func main() {
 }
 
 func handlerLogin(s *state, cmd command) error {
-	if len(cmd.args) == 0 {
+	if len(cmd.args) != 1 {
 		return errors.New("usage: gator login <username>")
 	}
 	name := cmd.args[0]
@@ -109,7 +113,7 @@ func handlerLogin(s *state, cmd command) error {
 }
 
 func handlerRegister(s *state, cmd command) error {
-	if len(cmd.args) == 0 {
+	if len(cmd.args) != 1 {
 		return errors.New("usage: gator register <username>")
 	}
 
@@ -159,17 +163,26 @@ func handlerUsers(s *state, cmd command) error {
 }
 
 func handlerAgg(s *state, cmd command) error {
-	feed, err := rss.FetchFeed(context.Background(), "https://www.wagslane.dev/index.xml")
+	if len(cmd.args) != 1 {
+		return errors.New("usage: gator agg <time_between_reqs>")
+	}
+
+	delta, err := time.ParseDuration(cmd.args[0])
 	if err != nil {
 		return err
 	}
 
-	fmt.Println(feed)
-	return nil
+	fmt.Printf("Collecting feeds every %s", cmd.args[0])
+	ticker := time.NewTicker(delta)
+
+	for ; ; <-ticker.C {
+		scrapeFeeds(s)
+	}
+
 }
 
 func handlerAddFeed(s *state, cmd command, user database.User) error {
-	if len(cmd.args) < 2 {
+	if len(cmd.args) != 2 {
 		return errors.New("usage: gator addfeed <feed name> <URL>")
 	}
 	arg := database.CreateFeedParams{ID: uuid.New(), CreatedAt: time.Now(), UpdatedAt: time.Now(), Name: cmd.args[0], Url: cmd.args[1], UserID: user.ID}
@@ -198,7 +211,7 @@ func handlerFeeds(s *state, cmd command) error {
 }
 
 func handlerFollow(s *state, cmd command, user database.User) error {
-	if len(cmd.args) < 1 {
+	if len(cmd.args) != 1 {
 		return errors.New("usage: gator follow <url>")
 	}
 	url := cmd.args[0]
@@ -228,6 +241,52 @@ func handlerFollowing(s *state, cmd command, user database.User) error {
 	return nil
 }
 
+func handlerUnfollow(s *state, cmd command, user database.User) error {
+	if len(cmd.args) != 1 {
+		return errors.New("usage: gator unfollow <feedURL>")
+	}
+
+	feed, err := s.db.GetFeedByUrl(context.Background(), cmd.args[0])
+	if err != nil {
+		return err
+	}
+
+	args := database.DeleteFeedFollowParams{FeedID: feed.ID, UserID: user.ID}
+	err = s.db.DeleteFeedFollow(context.Background(), args)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func handlerBrowse(s *state, cmd command, user database.User) error {
+	var limit int
+	if len(cmd.args) != 1 {
+		limit = 2
+	} else {
+		var err error
+		limit, err = strconv.Atoi(cmd.args[0])
+		if err != nil {
+			return errors.New("limit must be an integer, usage: gator browse <limit>")
+		}
+	}
+
+	args := database.GetPostsForUserParams{ID: user.ID, Limit: int32(limit)}
+	posts, err := s.db.GetPostsForUser(context.Background(), args)
+	if err != nil {
+		return err
+	}
+	for _, p := range posts {
+		fmt.Println("---")
+		fmt.Println(p.Title)
+		fmt.Println(p.Url)
+		fmt.Println(p.PublishedAt.Time)
+		fmt.Println(p.Description.String)
+	}
+	return nil
+
+}
+
 func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) error) func(*state, command) error {
 	return func(s *state, cmd command) error {
 		user, err := s.db.GetUser(context.Background(), s.cfg.Username)
@@ -237,4 +296,82 @@ func middlewareLoggedIn(handler func(s *state, cmd command, user database.User) 
 		return handler(s, cmd, user)
 
 	}
+}
+
+func scrapeFeeds(s *state) error {
+	feed, err := s.db.GetNextFeedToFetch(context.Background())
+	if err != nil {
+		return err
+	}
+	mark_args := database.MarkFeedFetchedParams{ID: feed.ID, UpdatedAt: time.Now()}
+	err = s.db.MarkFeedFetched(context.Background(), mark_args)
+	if err != nil {
+		return err
+	}
+	rssFeed, err := rss.FetchFeed(context.Background(), feed.Url)
+	if err != nil {
+		return err
+	}
+
+	for _, i := range rssFeed.Channel.Item {
+		var desc sql.NullString
+		if i.Description != nil && *i.Description != "" {
+			desc.String = *i.Description
+			desc.Valid = true
+		} else {
+			desc.Valid = false
+		}
+
+		var pub sql.NullTime
+		if i.PubDate != nil && *i.PubDate != "" {
+			parsedTime, err := parseDate(*i.PubDate)
+			if err != nil {
+				pub.Valid = false
+			} else {
+				pub.Time = parsedTime
+				pub.Valid = true
+			}
+		}
+
+		args := database.CreatePostParams{
+			ID:          uuid.New(),
+			CreatedAt:   time.Now(),
+			UpdatedAt:   time.Now(),
+			Title:       i.Title,
+			Url:         i.Link,
+			Description: desc,
+			PublishedAt: pub,
+			FeedID:      feed.ID,
+		}
+		_, err := s.db.CreatePost(context.Background(), args)
+		if err != nil {
+			if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+				continue
+			}
+			return err
+		}
+		fmt.Println(i.Title)
+	}
+
+	return nil
+}
+
+func parseDate(s string) (time.Time, error) {
+	var timeFormats = []string{
+		time.RFC1123,
+		time.RFC1123Z,
+		time.RFC3339,
+		"2006-01-02",
+		"02 Jan 2006",
+	}
+
+	for _, format := range timeFormats {
+		ptime, err := time.Parse(format, s)
+		if err != nil {
+			continue
+		}
+		return ptime, nil
+	}
+	return time.Time{}, errors.New("unfamiliar time format")
+
 }
