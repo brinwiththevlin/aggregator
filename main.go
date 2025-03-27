@@ -1,9 +1,6 @@
 package main
 
 import (
-	"aggregator/internal/config"
-	"aggregator/internal/database"
-	"aggregator/internal/rss"
 	"context"
 	"database/sql"
 	"errors"
@@ -13,6 +10,9 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/brinwiththevlin/aggregator/internal/config"
+	"github.com/brinwiththevlin/aggregator/internal/database"
+	"github.com/brinwiththevlin/aggregator/internal/rss"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
