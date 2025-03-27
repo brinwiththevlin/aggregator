@@ -28,16 +28,32 @@ type command struct {
 	args []string
 }
 
-type commands struct {
-	handler map[string]func(*state, command) error
+type handler struct {
+	handler     func(*state, command) error
+	description string
 }
 
-func (c *commands) register(name string, f func(*state, command) error) {
-	c.handler[name] = f
+type commands struct {
+	handler map[string]handler
 }
+
+func (c *commands) register(name string, f func(*state, command) error, d string) {
+	c.handler[name] = handler{handler: f, description: d}
+}
+
+func (c *commands) describe() error {
+	for cmd, h := range c.handler {
+		fmt.Printf("* name: %s, usage: %s\n", cmd, h.description)
+	}
+	return nil
+}
+
 func (c *commands) run(s *state, cmd command) error {
 	name := cmd.name
-	return c.handler[name](s, cmd)
+	if name == "help" {
+		return c.describe()
+	}
+	return c.handler[name].handler(s, cmd)
 
 }
 
@@ -64,19 +80,19 @@ func main() {
 	dbQueries := database.New(db)
 	s.db = dbQueries
 
-	handlers := make(map[string]func(*state, command) error)
+	handlers := make(map[string]handler)
 	cmds := commands{handler: handlers}
-	cmds.register("login", handlerLogin)
-	cmds.register("register", handlerRegister)
-	cmds.register("reset", handlerReset)
-	cmds.register("users", handlerUsers)
-	cmds.register("agg", handlerAgg)
-	cmds.register("addfeed", middlewareLoggedIn(handlerAddFeed))
-	cmds.register("feeds", handlerFeeds)
-	cmds.register("follow", middlewareLoggedIn(handlerFollow))
-	cmds.register("following", middlewareLoggedIn(handlerFollowing))
-	cmds.register("unfollow", middlewareLoggedIn(handlerUnfollow))
-	cmds.register("browse", middlewareLoggedIn(handlerBrowse))
+	cmds.register("login", handlerLogin, "gator login <user_name>")
+	cmds.register("register", handlerRegister, "gator register <user_name>")
+	cmds.register("reset", handlerReset, "gator reset")
+	cmds.register("users", handlerUsers, "gator users")
+	cmds.register("agg", handlerAgg, "gator agg <duration>")
+	cmds.register("addfeed", middlewareLoggedIn(handlerAddFeed), "gator addfeed <feed> <url>")
+	cmds.register("feeds", handlerFeeds, "gator feeds")
+	cmds.register("follow", middlewareLoggedIn(handlerFollow), "gator follow <url>")
+	cmds.register("following", middlewareLoggedIn(handlerFollowing), "gator following")
+	cmds.register("unfollow", middlewareLoggedIn(handlerUnfollow), "gator unfollow <url>")
+	cmds.register("browse", middlewareLoggedIn(handlerBrowse), "gator browse <limit>")
 
 	commandName := args[1]
 	commandArgs := args[2:]
